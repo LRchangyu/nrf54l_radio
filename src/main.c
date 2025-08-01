@@ -92,8 +92,9 @@ static uint32_t bytewise_bitswap(uint32_t inp)
            | (swap_bits(inp));
 }
 
+#define RADIO_PKT_LEN 8 // Radio packet length in bytes
 // Radio configuration for 2.4GHz proprietary protocol
-static uint8_t radio_packet[32] = {0x01, 0x02, 0x03, 0x04}; // Example packet data
+static uint8_t radio_packet[RADIO_PKT_LEN] = {0}; // Example packet data
 static volatile bool radio_ready = false;
 static bool m_is_tx_dev = false; // Flag to indicate if we are in TX mode
 
@@ -307,8 +308,8 @@ void radio_init(void)
     NRF_RADIO->PCNF1 = (RADIO_PCNF1_WHITEEN_Disabled << RADIO_PCNF1_WHITEEN_Pos) |
                        (RADIO_PCNF1_ENDIAN_Big       << RADIO_PCNF1_ENDIAN_Pos)  |
                        (4   << RADIO_PCNF1_BALEN_Pos)   |
-                       (8         << RADIO_PCNF1_STATLEN_Pos) |  // 修正：数据包长度8字节
-                       (8       << RADIO_PCNF1_MAXLEN_Pos); //lint !e845 "The right argument to operator '|' is certain to be 0"
+                       (RADIO_PKT_LEN         << RADIO_PCNF1_STATLEN_Pos) |  // 
+                       (RADIO_PKT_LEN       << RADIO_PCNF1_MAXLEN_Pos); //lint !e845 "The right argument to operator '|' is certain to be 0"
 
     // CRC Config
     NRF_RADIO->CRCCNF = (RADIO_CRCCNF_LEN_Two << RADIO_CRCCNF_LEN_Pos); // Number of checksum bits
@@ -347,6 +348,25 @@ void radio_init(void)
 #define RADIO_TIMER_IRQ  TIMER10_IRQHandler
 #define RADIO_TIMER_IRQ_IDX  TIMER10_IRQn
 
+//============================================================================================================================//
+#define USR_SPIM  NRF_SPIM21
+static void spi20_init(void){
+	USR_SPIM->CONFIG = (SPIM_CONFIG_CPHA_Leading << SPIM_CONFIG_CPHA_Pos) |
+						 (SPIM_CONFIG_CPOL_ActiveHigh << SPIM_CONFIG_CPOL_Pos) |
+						 (SPIM_CONFIG_ORDER_MsbFirst << SPIM_CONFIG_ORDER_Pos) ;
+    USR_SPIM->PRESCALER = 4; //
+	
+	USR_SPIM->PSEL.CSN = (32 + 10); // P1.11
+	USR_SPIM->PSEL.SCK = (32 + 11); // P1.15
+	USR_SPIM->PSEL.MOSI = (32 + 12); // P1.14
+	USR_SPIM->PSEL.MISO = (32 + 13); // P1.13
+	
+	USR_SPIM->DMA.TX.PTR = (uint32_t)radio_packet; // TX buffer address
+	USR_SPIM->DMA.TX.MAXCNT = 8;
+
+	USR_SPIM->ENABLE = SPIM_ENABLE_ENABLE_Enabled; // Enable SPIM20
+}
+
 int main(void)
 {
 	printf("Hello World! %s\n", CONFIG_BOARD_TARGET);
@@ -368,14 +388,6 @@ int main(void)
 		#define RADIO_TIMER2TX_CH 0  // 使用 DPPI 通道 2 连接定时器和无线电
 		#define RADIO_DISABLE_CH 1  // 使用 DPPI 通道 3 连接无线电禁用事件
 		// 初始化第一个数据包
-		radio_packet[0] = 0x01; // Packet type
-		radio_packet[1] = 0x00; // Counter MSB
-		radio_packet[2] = 0x00; 
-		radio_packet[3] = 0x00;
-		radio_packet[4] = 0x00; // Counter LSB
-		radio_packet[5] = 0xAA; // Fixed pattern
-		radio_packet[6] = 0xBB; // Fixed pattern
-		radio_packet[7] = 0xCC; // Fixed pattern
 		
 		RADIO_TIMER->TASKS_CLEAR = 1;
 		RADIO_TIMER->MODE = 0;          // Timer mode
@@ -439,6 +451,19 @@ int main(void)
 		rx_scan_timer_init();
 		
 		NRF_RADIO->SHORTS = RADIO_SHORTS_RXREADY_START_Msk | RADIO_SHORTS_PHYEND_DISABLE_Msk | RADIO_SHORTS_DISABLED_RXEN_Msk; // 连续接收循环
+
+		spi20_init();
+		#define RADIO_RX2SPI_CH 0 // 
+
+		NRF_RADIO->PUBLISH_PHYEND = ((1ul<<31)|RADIO_RX2SPI_CH); // 
+		NRF_DPPIC10->CHEN = (1<<RADIO_RX2SPI_CH);  // 
+
+		NRF_PPIB11->SUBSCRIBE_SEND[0] = ((1ul<<31)|RADIO_RX2SPI_CH); // 
+
+		// dppi10 and dppi20 can be different ch, this demo use the same ch for simplicity
+		NRF_PPIB21->PUBLISH_RECEIVE[0] = ((1ul<<31)|RADIO_RX2SPI_CH); // 
+		USR_SPIM->SUBSCRIBE_START = ((1ul<<31)|RADIO_RX2SPI_CH); // 订阅 DPPI 通道事件
+		NRF_DPPIC20->CHEN = (1<<RADIO_RX2SPI_CH);  
 
 		// Set packet pointer to RX buffer
 		NRF_RADIO->PACKETPTR = (uint32_t)radio_packet;
